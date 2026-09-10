@@ -16,10 +16,10 @@ You need:
 - A Cisco Secure Access API key with these permissions:
   - `policies.privateresources:read`
   - `policies.privateresources:write`
-  - `deployments.resourceconnectors:read`
 - The API key client ID and client secret.
-- At least one DNS-enabled Resource Connector Group. The importer reads this
-  group to determine the Cisco DNS server ID to use for the resources.
+- The numeric internal DNS server ID to use. You can retrieve it from an
+  existing correctly configured Private Resource with the read-only command
+  shown below.
 
 The importer uses only Python standard-library modules. It does not require a
 Python package installation or a virtual environment.
@@ -52,12 +52,17 @@ Run the following commands, replacing the placeholder values:
 ```bat
 set "CISCO_SECURE_ACCESS_CLIENT_ID=your-client-id"
 set "CISCO_SECURE_ACCESS_CLIENT_SECRET=your-client-secret"
+set "CISCO_SECURE_ACCESS_DNS_SERVER_ID=123456"
 ```
 
 These commands are the Windows Command Prompt equivalent of macOS/Linux
 `export`. They set credentials only in the current Command Prompt window.
 Closing that window clears them. Do not place credentials in the CSV file or
 in `private_resource_importer.py`.
+
+`CISCO_SECURE_ACCESS_DNS_SERVER_ID` is a tenant-specific configuration value,
+not a secret. Use the `dnsServerId` from a working resource that uses the DNS
+server you want; do not substitute a Resource Connector Group ID or name.
 
 ## Create one resource
 
@@ -67,11 +72,6 @@ resource, but does not create or change anything:
 ```bat
 py private_resource_importer.py --fqdn rdp-01.customer.internal
 ```
-
-If more than one internal DNS option is available, select the number matching
-the DNS-enabled Resource Connector Group that should resolve the resource.
-The command displays the Connector Group name, DNS server ID, and forwarded
-domains before prompting.
 
 Review the JSON output. Confirm:
 
@@ -121,22 +121,12 @@ The importer creates resources serially and stops at the first failure. Any
 resources verified before a later failure remain created. A retry must use a
 CSV that omits any resources that were already created.
 
-## Unattended or repeatable imports
+## One-command DNS override
 
-To avoid the interactive DNS prompt, set the DNS-enabled Resource Connector
-Group name once in the current Command Prompt session:
-
-```bat
-set "CISCO_SECURE_ACCESS_DNS_SERVER_GROUP=Customer DNS Connector Group"
-```
-
-Then use the same dry-run and apply commands. The group name must resolve to
-one Connector Group with exactly one `forwardDNS` DNS server ID.
-
-You can also specify it for one command:
+To override the configured DNS server ID for one command:
 
 ```bat
-py private_resource_importer.py --csv private_resources.csv --dns-server-group "Customer DNS Connector Group"
+py private_resource_importer.py --csv private_resources.csv --dns-server-id 123456
 ```
 
 ## After creation
@@ -159,13 +149,18 @@ py private_resource_importer.py --show-connector-group "Customer DNS Connector G
 py private_resource_importer.py --show-private-resource 123456
 ```
 
+`--show-private-resource` is the relevant command for finding a DNS server ID.
+`--show-connector-group` is optional diagnostic output and is not involved in
+resource creation. It requires the additional
+`deployments.resourceconnectors:read` API permission.
+
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
 | `py` is not recognized | Install Python 3.10+ and reopen Command Prompt. |
 | Credential error | Set both API environment variables in the same Command Prompt window used to run the importer. |
-| No DNS choices are listed | Confirm the API key has `deployments.resourceconnectors:read` and the selected Connector Group has a configured forward DNS server. |
+| DNS server ID error | Set `CISCO_SECURE_ACCESS_DNS_SERVER_ID` to a positive numeric `dnsServerId` copied from a correctly configured Private Resource. |
 | Resource name already exists | The importer is create-only. Remove the existing resource only if approved, or use a different FQDN. |
 | CSV stops after a failure | Review the reported row. Previously created rows remain in Cisco Secure Access and must be omitted before retrying. |
 | Audit entry is not visible immediately | Confirm the resource in Private Resources first, then refresh the audit log after a few minutes. |
@@ -178,5 +173,5 @@ the window, run:
 ```bat
 set "CISCO_SECURE_ACCESS_CLIENT_ID="
 set "CISCO_SECURE_ACCESS_CLIENT_SECRET="
-set "CISCO_SECURE_ACCESS_DNS_SERVER_GROUP="
+set "CISCO_SECURE_ACCESS_DNS_SERVER_ID="
 ```
