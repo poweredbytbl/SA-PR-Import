@@ -81,20 +81,10 @@ class Result:
     resource_name: str
     protocol: str
     port: str
-    dns_server_group: str
     dns_server_id: int
     status: str
     resource_id: int | None = None
     message: str | None = None
-
-
-@dataclass(frozen=True)
-class DnsServerChoice:
-    connector_group_name: str
-    connector_group_id: int
-    dns_server_id: int
-    domains: str
-
 
 def normalise_fqdn(value: str) -> str:
     fqdn = value.strip().rstrip(".").lower()
@@ -320,11 +310,9 @@ class PrivateResourceImporter:
     def __init__(
         self,
         client: CiscoSecureAccessClient,
-        dns_server_group: str,
         dns_server_id: int,
     ) -> None:
         self.client = client
-        self.dns_server_group = dns_server_group
         self.dns_server_id = dns_server_id
 
     def preflight(self, items: list[ResourceInput]) -> None:
@@ -355,7 +343,6 @@ class PrivateResourceImporter:
                     resource_name=item.resource_name,
                     protocol=RDP_PROTOCOL,
                     port=RDP_PORT,
-                    dns_server_group=self.dns_server_group,
                     dns_server_id=self.dns_server_id,
                     status="dry-run",
                     message="Validated; no API write was requested",
@@ -382,7 +369,6 @@ class PrivateResourceImporter:
                         resource_name=item.resource_name,
                         protocol=RDP_PROTOCOL,
                         port=RDP_PORT,
-                        dns_server_group=self.dns_server_group,
                         dns_server_id=self.dns_server_id,
                         status="created",
                         resource_id=resource_id,
@@ -395,7 +381,6 @@ class PrivateResourceImporter:
                         resource_name=item.resource_name,
                         protocol=RDP_PROTOCOL,
                         port=RDP_PORT,
-                        dns_server_group=self.dns_server_group,
                         dns_server_id=self.dns_server_id,
                         status="failed",
                         resource_id=resource_id,
@@ -467,10 +452,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Show one Private Resource's configuration; makes no changes",
     )
     parser.add_argument(
-        "--dns-server-group",
+        "--dns-server-id",
+        type=int,
         help=(
-            "DNS-enabled Resource Connector Group to use; overrides "
-            "CISCO_SECURE_ACCESS_DNS_SERVER_GROUP"
+            "Cisco internal DNS server ID; overrides "
+            "CISCO_SECURE_ACCESS_DNS_SERVER_ID"
         ),
     )
     parser.add_argument(
@@ -553,103 +539,22 @@ def private_resource_details(
     }
 
 
-def resolve_dns_server_group(client: CiscoSecureAccessClient, name: str) -> int:
-    """Resolve a DNS-enabled Connector Group name to Cisco's DNS server ID."""
-    matches = [
-        group
-        for group in client.list_connector_groups()
-        if str(group.get("name", "")).casefold() == name.casefold()
-    ]
-    if len(matches) != 1 or "id" not in matches[0]:
+def resolve_dns_server_id(args: argparse.Namespace) -> int:
+    """Read and validate the DNS server ID without inspecting Connector Groups."""
+    value: int | str | None = args.dns_server_id
+    if value is None:
+        value = os.getenv("CISCO_SECURE_ACCESS_DNS_SERVER_ID")
+    if value is None or str(value).strip() == "":
         raise ImporterError(
-            f"DNS server group {name!r} did not resolve to exactly one Connector Group"
+            "Set CISCO_SECURE_ACCESS_DNS_SERVER_ID or pass --dns-server-id"
         )
-    group = client.get_connector_group(int(matches[0]["id"]))
-    forward_dns = group.get("forwardDNS") or []
-    if isinstance(forward_dns, dict):
-        forward_dns = [forward_dns]
-    dns_server_ids = {
-        int(entry["dnsResourceId"])
-        for entry in forward_dns
-        if isinstance(entry, dict) and entry.get("dnsResourceId") is not None
-    }
-    if len(dns_server_ids) != 1:
-        raise ImporterError(
-            f"DNS server group {name!r} must expose exactly one forwardDNS dnsResourceId; "
-            f"found {len(dns_server_ids)}"
-        )
-    return dns_server_ids.pop()
-
-
-def discover_dns_server_choices(client: CiscoSecureAccessClient) -> list[DnsServerChoice]:
-    """Return every DNS server exposed by a Connector Group's forward DNS."""
-    choices: list[DnsServerChoice] = []
-    for listed_group in client.list_connector_groups():
-        if "id" not in listed_group:
-            continue
-        group_id = int(listed_group["id"])
-        group_name = str(listed_group.get("name", group_id))
-        group = client.get_connector_group(group_id)
-        forward_dns = group.get("forwardDNS") or []
-        if isinstance(forward_dns, dict):
-            forward_dns = [forward_dns]
-        for entry in forward_dns:
-            if not isinstance(entry, dict) or entry.get("dnsResourceId") is None:
-                continue
-            domains_value = entry.get("domains")
-            if isinstance(domains_value, list):
-                domains = ", ".join(str(domain) for domain in domains_value)
-            else:
-                domains = str(domains_value or "all domains")
-            choices.append(
-                DnsServerChoice(
-                    connector_group_name=group_name,
-                    connector_group_id=group_id,
-                    dns_server_id=int(entry["dnsResourceId"]),
-                    domains=domains,
-                )
-            )
-    return sorted(
-        choices,
-        key=lambda choice: (
-            choice.connector_group_name.casefold(),
-            choice.connector_group_id,
-            choice.dns_server_id,
-        ),
-    )
-
-
-def prompt_for_dns_server_choice(
-    choices: list[DnsServerChoice],
-) -> DnsServerChoice:
-    if not choices:
-        raise ImporterError(
-            "No DNS-enabled Connector Groups with a forwardDNS dnsResourceId were found"
-        )
-    print("Available internal DNS servers:", file=sys.stderr)
-    for index, choice in enumerate(choices, start=1):
-        print(
-            f"  {index}. {choice.connector_group_name} "
-            f"(Connector Group {choice.connector_group_id}; "
-            f"DNS server {choice.dns_server_id}; domains: {choice.domains})",
-            file=sys.stderr,
-        )
-    while True:
-        print(
-            f"Select an internal DNS server [1-{len(choices)}] (or q to cancel): ",
-            end="",
-            file=sys.stderr,
-            flush=True,
-        )
-        selection = sys.stdin.readline()
-        if not selection:
-            raise ImporterError("Interactive DNS selection was cancelled")
-        selection = selection.strip()
-        if selection.casefold() in {"q", "quit"}:
-            raise ImporterError("Interactive DNS selection was cancelled")
-        if selection.isdigit() and 1 <= int(selection) <= len(choices):
-            return choices[int(selection) - 1]
-        print("Enter one of the displayed numbers, or q to cancel.", file=sys.stderr)
+    try:
+        dns_server_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ImporterError("DNS server ID must be a positive integer") from exc
+    if dns_server_id <= 0:
+        raise ImporterError("DNS server ID must be a positive integer")
+    return dns_server_id
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -668,21 +573,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         items = load_inputs(args)
-        dns_server_group = args.dns_server_group or os.getenv(
-            "CISCO_SECURE_ACCESS_DNS_SERVER_GROUP"
-        )
-        if dns_server_group:
-            dns_server_id = resolve_dns_server_group(client, dns_server_group)
-        else:
-            if not sys.stdin.isatty():
-                raise ImporterError(
-                    "Set CISCO_SECURE_ACCESS_DNS_SERVER_GROUP or pass "
-                    "--dns-server-group when standard input is not interactive"
-                )
-            choice = prompt_for_dns_server_choice(discover_dns_server_choices(client))
-            dns_server_group = choice.connector_group_name
-            dns_server_id = choice.dns_server_id
-        importer = PrivateResourceImporter(client, dns_server_group, dns_server_id)
+        dns_server_id = resolve_dns_server_id(args)
+        importer = PrivateResourceImporter(client, dns_server_id)
         results = importer.run(items, args.apply)
         emit_results(results, args.output)
         return 0
